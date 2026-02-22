@@ -61,14 +61,27 @@ def fetch_contracte_atribuite(data_start: str, data_sfarsit: str, pagina: int = 
     Preia contractele atribuite din SICAP pentru domeniul construcțiilor.
     Returnează un DataFrame cu firmele câștigătoare.
     """
-    url = "https://sicap-prod.e-licitatie.ro/pub/reports/awardNotices/filter"
-    
+    # Headere care imită exact un browser real
     headers = {
         "Content-Type": "application/json",
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ro-RO,ro;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Origin": "https://sicap-prod.e-licitatie.ro",
+        "Referer": "https://sicap-prod.e-licitatie.ro/pub/reports/awardNotices",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
     }
-    
+
+    # Încearcă ambele endpoint-uri posibile
+    urls = [
+        "https://sicap-prod.e-licitatie.ro/pub/reports/awardNotices/filter",
+        "https://e-licitatie.ro/pub/reports/awardNotices/filter",
+    ]
+
     payload = {
         "pageSize": nr_rezultate,
         "pageNumber": pagina,
@@ -82,42 +95,64 @@ def fetch_contracte_atribuite(data_start: str, data_sfarsit: str, pagina: int = 
         "valueFrom": None,
         "valueTo": None
     }
-    
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        
-        items = data.get("items", [])
-        if not items:
-            return pd.DataFrame(), 0
-        
-        total = data.get("total", 0)
-        
-        rows = []
-        for item in items:
-            cpv = item.get("cpvCode", "") or ""
-            # Filtru: păstrăm doar construcții (CPV 45xxxxxx sau 71xxxxxx)
-            if not (cpv.startswith("45") or cpv.startswith("71")):
-                continue
-            
-            rows.append({
-                "🏢 Firmă câștigătoare": item.get("supplierName", "N/A"),
-                "CUI": item.get("supplierId", "N/A"),
-                "💰 Valoare (lei)": item.get("contractValue", 0),
-                "📋 Obiect contract": item.get("contractTitle", "N/A"),
-                "🏛️ Autoritate contractantă": item.get("contractingAuthorityName", "N/A"),
-                "📅 Data atribuirii": item.get("awardDate", "N/A"),
-                "🔢 Cod CPV": cpv,
-                "📌 Tip lucrare": CPV_CONSTRUCTII.get(cpv[:8], "Construcții"),
-                "ID Anunț": item.get("noticeId", "N/A"),
-            })
-        
-        return pd.DataFrame(rows), total
-    
-    except requests.exceptions.RequestException as e:
-        st.error(f"⚠️ Eroare la conectarea cu SICAP: {e}")
-        return pd.DataFrame(), 0
+
+    last_error = None
+    for url in urls:
+        try:
+            # Sesiune cu retry automat
+            session = requests.Session()
+            adapter = requests.adapters.HTTPAdapter(max_retries=3)
+            session.mount("https://", adapter)
+
+            response = session.post(url, json=payload, headers=headers, timeout=45)
+            response.raise_for_status()
+            data = response.json()
+
+            items = data.get("items", [])
+            if items is None:
+                return pd.DataFrame(), 0
+
+            total = data.get("total", 0)
+
+            rows = []
+            for item in items:
+                cpv = item.get("cpvCode", "") or ""
+                # Filtru: păstrăm doar construcții (CPV 45xxxxxx sau 71xxxxxx)
+                if not (cpv.startswith("45") or cpv.startswith("71")):
+                    continue
+
+                rows.append({
+                    "🏢 Firmă câștigătoare": item.get("supplierName", "N/A"),
+                    "CUI": item.get("supplierId", "N/A"),
+                    "💰 Valoare (lei)": item.get("contractValue", 0) or 0,
+                    "📋 Obiect contract": item.get("contractTitle", "N/A"),
+                    "🏛️ Autoritate contractantă": item.get("contractingAuthorityName", "N/A"),
+                    "📅 Data atribuirii": item.get("awardDate", "N/A"),
+                    "🔢 Cod CPV": cpv,
+                    "📌 Tip lucrare": CPV_CONSTRUCTII.get(cpv[:8], "Construcții"),
+                    "ID Anunț": item.get("noticeId", "N/A"),
+                })
+
+            return pd.DataFrame(rows), total
+
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            continue  # Încearcă next URL
+
+    # Dacă ambele au eșuat
+    st.error(f"""
+    ⚠️ **Nu m-am putut conecta la SICAP.**
+
+    SICAP (site-ul statului) nu răspunde în acest moment. Acest lucru se întâmplă uneori
+    când serverele lor sunt supraîncărcate sau în mentenanță.
+
+    **Ce poți face:**
+    - Încearcă din nou peste 5-10 minute
+    - Verifică dacă [SICAP](https://sicap-prod.e-licitatie.ro) este accesibil din browserul tău
+
+    *Detaliu tehnic: {str(last_error)[:100]}*
+    """)
+    return pd.DataFrame(), 0
 
 
 def fetch_detalii_firma(cui: str):
